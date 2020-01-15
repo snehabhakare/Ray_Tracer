@@ -61,6 +61,40 @@ float GenLight::Shadow(Ray ray, float t_max)
     hitInfo.Init();
     return not TraceShadowRay(rootNode,ray,hitInfo,t_max);
 }
+
+Color PointLight::Illuminate(Vec3f const &p, Vec3f const &N) const
+{   
+    if(size>0){
+        // compute coordinate axes
+        Vec3f Z = (position-p).GetNormalized();
+        Vec3f R = Vec3f(0,0,1);
+        if(Z.z>0.8) R = Vec3f(0,1,0);
+        Vec3f X = R ^ Z;
+        Vec3f Y = X ^ Z;
+        X.Normalize();
+        Y.Normalize();
+        Matrix3f CA(X, Y, Z);
+        // declare camera, pixel variables
+        Vec3f lightpos, dir;
+        float r, theta, s=rand()%100;    
+        int min_sample = 4;
+        int max_sample = 4;  
+        int num_sample = 0;
+        float shadow = 0;
+        while(num_sample < max_sample){
+            // generate light position sample
+            r = size*sqrt(((float)rand())/RAND_MAX);
+            theta = 2*M_PI*((float)rand())/RAND_MAX;
+            lightpos = CA*Vec3f(r*cos(theta), r*sin(theta), 0);        
+            // trace the shadow ray
+            shadow += Shadow(Ray(p, position+lightpos-p),1);
+            num_sample++;
+            if(num_sample==min_sample && shadow!=num_sample && shadow!=0) break;
+        }
+        return shadow/(float)num_sample*intensity;    
+    } 
+    else return Shadow(Ray(p,position-p),1) * intensity;
+}
 	
 bool Sphere::IntersectRay( const Ray &ray, HitInfo &hitinfo, int hitSide) const
 {
@@ -301,6 +335,10 @@ bool TraceRay(const Ray &ray, HitInfo &hitinfo){
 
 void updatePixel(int n, float z, int s, Color color){
 	// update pixel color value
+    float gamma = 2.2;
+    color.r = pow(color.r, (1.0 / gamma));
+    color.g = pow(color.g, (1.0 / gamma));
+    color.b = pow(color.b, (1.0 / gamma));
     Color24* pColor = renderImage.GetPixels();
     pColor[n] = (Color24) color;
     // update pixel z value
@@ -311,35 +349,58 @@ void updatePixel(int n, float z, int s, Color color){
     sampleCount[n] = (uint8_t) s; 
 }
 
+Vec3f GlossyNormal(Vec3f normal, float radius)
+{
+    Vec3f Z = normal;
+    Vec3f R = Vec3f(0,0,1);
+    if(Z.z>0.8) R = Vec3f(0,1,0);
+    Vec3f X = R ^ Z;
+    Vec3f Y = X ^ Z;
+    X.Normalize();
+    Y.Normalize();
+    Matrix3f CA(X, Y, Z);
+    float r = radius*sqrt(((float)rand())/RAND_MAX);
+    float theta = 2*M_PI*((float)rand())/RAND_MAX;
+    return (normal+CA*Vec3f(r*cos(theta), r*sin(theta), 0)).GetNormalized();
+}
+
 Color MtlBlinn::Shade(Ray const &ray, const HitInfo &hInfo, const LightList &lights, int bounceCount) const
 {
     Color output(0.0);
-    Vec3f N = hInfo.N;
     Vec3f V = (-ray.dir).GetNormalized();
-    Vec3f X = hInfo.p;
+    Vec3f P = hInfo.p;
     const Material *mat = hInfo.node->GetMaterial();
     const MtlBlinn *mtl = static_cast<const MtlBlinn*>(mat);
-    float alpha = mtl->glossiness;
-    float diffuse, specular;
     Color Kd = mtl->diffuse.Sample(hInfo.uvw, hInfo.duvw);
     Color Ks = mtl->specular.Sample(hInfo.uvw, hInfo.duvw);
-
+    float alpha = mtl->glossiness;
+    
+    Color LI;
+    Vec3f N, L, H, RR;
+    float diffuse, specular;
+    // direct illumination
+    N = hInfo.N;
     for(int i=0; i<lights.size(); i++){
         // ambient light
+        LI = lights[i]->Illuminate(P,N); 
         if(lights[i]->IsAmbient()){
-            output += lights[i]->Illuminate(X,N) * Kd;
+            output += LI * Kd;
         }
         else{
             // diffuse reflection
-            Vec3f L = -1*lights[i]->Direction(X);
-            Vec3f H = (L+V).GetNormalized();
+            L = -1*lights[i]->Direction(P);
             diffuse = N.Dot(L);
             if(diffuse>0){
-                output += lights[i]->Illuminate(X,N) * diffuse * Kd;
+                output += LI * diffuse * Kd;
+                // phong
+                // RR = (N*2.0*L.Dot(N)-L).GetNormalized();
+                // specular = V.Dot(RR);
+                // blinn phong
+                H = (L+V).GetNormalized();
                 specular = N.Dot(H);
                 // specular reflection
                 if(specular>0)
-                    output += lights[i]->Illuminate(X,N) * pow(specular,alpha) * Ks;
+                    output += LI * pow(specular,alpha) * Ks;
             }
         }
     }
@@ -347,6 +408,8 @@ Color MtlBlinn::Shade(Ray const &ray, const HitInfo &hInfo, const LightList &lig
     float R=0;
     // refraction
     if(mtl->refraction.GetColor().Sum()>0 && bounceCount>0){
+        if (refractionGlossiness > 0) N = GlossyNormal(hInfo.N,refractionGlossiness);
+        else N = hInfo.N;
         float n;    // n1/n2 ratio
         if(hInfo.front){
             n = 1/mtl->ior;
@@ -362,13 +425,12 @@ Color MtlBlinn::Shade(Ray const &ray, const HitInfo &hInfo, const LightList &lig
         float sin2 = n * sin1;
         
         if(sin2<1.0){
-            float cos2 = sqrtf(max(0.0,1 - n*n*sinsq1));
+            float cos2 = sqrtf(max(0.0,1.0 - n*n*sinsq1));
             // initialize hitinfo
             HitInfo hitinfo;
             hitinfo.Init();
-            Vec3f dir = -cos2*N -sin2*((V-cos1*N)).GetNormalized();
-
-            Ray refracted_ray(X, dir);
+            Vec3f refracted_dir = -cos2*N -sin2*((V-cos1*N)).GetNormalized();
+            Ray refracted_ray(P, refracted_dir);
             Color refracted_color(0.0);
             if(TraceRay(refracted_ray, hitinfo)){
                 refracted_color = hitinfo.node->GetMaterial()->Shade(refracted_ray,hitinfo,lights,bounceCount-1);
@@ -395,11 +457,13 @@ Color MtlBlinn::Shade(Ray const &ray, const HitInfo &hInfo, const LightList &lig
 
     // reflection
     if((mtl->reflection.GetColor().Sum()>0 || R>0) && bounceCount>0){
+        if (reflectionGlossiness > 0) N = GlossyNormal(hInfo.N,reflectionGlossiness);
+        else N = hInfo.N;
         // initialize hitinfo
         HitInfo hitinfo;
         hitinfo.Init();
-        Vec3f dir = (N*2.0*V.Dot(N)-V).GetNormalized();
-        Ray reflected_ray(X, dir);
+        Vec3f reflected_dir = (N*2.0*V.Dot(N)-V).GetNormalized();
+        Ray reflected_ray(P, reflected_dir);
         Color reflected_color(0.0);
         if(TraceRay(reflected_ray, hitinfo)){
             reflected_color = hitinfo.node->GetMaterial()->Shade(reflected_ray,hitinfo,lights,bounceCount-1);
@@ -408,6 +472,86 @@ Color MtlBlinn::Shade(Ray const &ray, const HitInfo &hInfo, const LightList &lig
             reflected_color = environment.SampleEnvironment(reflected_ray.dir);
         }
         output += (mtl->reflection.GetColor() + R*mtl->refraction.GetColor())*reflected_color;
+    }
+
+    // indirect illumination
+    if(bounceCount>0){
+        N = hInfo.N;
+        Color diffuse_color(0.0);
+        float phi, sin1, cos1, sin2, cos2;
+        HitInfo hitinfo;
+        Vec3f X, Y, Z, S;
+        Matrix3f CA;
+        // diffuse reflection
+        // compute coordinate axes
+        Z = N.GetNormalized();
+        S = Vec3f(0,0,1);
+        if(Z.z>0.8) S = Vec3f(0,1,0);
+        X = S ^ Z;
+        Y = X ^ Z;
+        X.Normalize();
+        Y.Normalize();
+        CA = Matrix3f(X, Y, Z);
+        // sample ray
+        cos1 = sqrtf(1-((float)rand())/RAND_MAX);
+        sin1 = sqrtf(1.0 - cos1*cos1);
+        phi = 2*M_PI*((float)rand())/RAND_MAX;
+        sin2 = sin(phi);
+        cos2 = cos(phi);
+        Vec3f diffuse_dir(sin1*cos2, sin1*sin2, cos1);
+        diffuse_dir = CA*diffuse_dir;
+        Ray diffuse_ray(P, diffuse_dir);
+        hitinfo.Init();
+        if(TraceRay(diffuse_ray, hitinfo)){
+            diffuse_color += hitinfo.node->GetMaterial()->Shade(diffuse_ray,hitinfo,lights,bounceCount-1);
+        }
+        else{
+            diffuse_color += environment.SampleEnvironment(diffuse_ray.dir);
+        }
+        diffuse = N.Dot(diffuse_dir);
+        if(diffuse>0){
+            output += (diffuse_color * Kd);
+        }
+        // specular reflection
+        if(Ks.Sum()>0){
+            Color specular_color(0.0);
+            // float alphabp = alpha;
+            float alphabp = alpha/2;
+            // compute coordinate axes
+            Z = (N*2.0*V.Dot(N)-V).GetNormalized();
+            S = Vec3f(0,0,1);
+            if(Z.z>0.8) S = Vec3f(0,1,0);
+            X = S ^ Z;
+            Y = X ^ Z;
+            X.Normalize();
+            Y.Normalize();
+            CA = Matrix3f(X, Y, Z);
+            // sample ray
+            cos1 = pow((float)rand()/RAND_MAX,1.0/(alphabp+1.0));
+            sin1 = sqrtf(1.0 - cos1*cos1);
+            phi = 2*M_PI*((float)rand())/RAND_MAX;
+            sin2 = sin(phi);
+            cos2 = cos(phi);
+            Vec3f specular_dir(sin1*cos2, sin1*sin2, cos1);
+            specular_dir = CA*specular_dir;
+            Ray specular_ray(P, specular_dir);
+            hitinfo.Init();
+            if(TraceRay(specular_ray, hitinfo)){
+                specular_color += hitinfo.node->GetMaterial()->Shade(specular_ray,hitinfo,lights,bounceCount-1);
+            }
+            else{
+                specular_color += environment.SampleEnvironment(specular_ray.dir);
+            }
+            // phong
+            // RR = (N*2.0*specular_dir.Dot(N)-specular_dir).GetNormalized();
+            // specular = V.Dot(RR);
+            // blinn phong
+            H = (specular_dir+V).GetNormalized();
+            specular = N.Dot(H);
+            if(specular>0){
+                output += (specular_color * Ks * (alphabp+2.0) / (alphabp+1.0));
+            }
+        }    
     }
 
     return output;
@@ -434,9 +578,9 @@ void Render(pixelIterator &pID){
     int x, y, n, num_sample;
     HitInfo hitinfo;
     bool hit;
-    float s, r, theta, cx, cy, px, py, hitz, threshold = 1e-6f;    
-    int min_sample = 4;
-    int max_sample = 64;  
+    float s, r, theta, cx, cy, px, py, hitz, threshold = 1e-4f;    
+    int min_sample = 1;
+    int max_sample = 1;  
     // for every pixel
     while(pID.PixelID(x,y,n)){
     	// compute camera to pixel ray
@@ -450,12 +594,15 @@ void Render(pixelIterator &pID){
         Color mean(0.0), m2(0.0);
         while(num_sample <= max_sample){
             // generate camera position sample
-            s = ((float)rand())/RAND_MAX;
-            r = camera.dof*sqrt(s);
-            theta = 2*M_PI*((float)rand())/RAND_MAX;
-            cx = r*cos(theta);
-            cy = r*sin(theta);
-            camerapos = Vec3f(cx,cy,0);
+            if(camera.dof>0){
+                s = ((float)rand())/RAND_MAX;
+                r = camera.dof*sqrt(s);
+                theta = 2*M_PI*((float)rand())/RAND_MAX;
+                cx = r*cos(theta);
+                cy = r*sin(theta);
+                camerapos = Vec3f(cx,cy,0);        
+            }
+            else camerapos = Vec3f(0);
             // generate the halton sample in pixel
             px = Halton(num_sample,2)*pw;
             py = Halton(num_sample,3)*ph;
@@ -468,7 +615,7 @@ void Render(pixelIterator &pID){
             // trace the ray
             hitinfo.Init();
             if(TraceRay(ray_pixel, hitinfo)){
-                pColor = hitinfo.node->GetMaterial()->Shade(ray_pixel,hitinfo,lights,3);
+                pColor = hitinfo.node->GetMaterial()->Shade(ray_pixel,hitinfo,lights,2);
                 hit = true;
                 hitz = min(hitz, hitinfo.z);
             }
@@ -505,10 +652,9 @@ void BeginRender()
         	threads[j].join();
     }
     renderImage.ComputeZBufferImage();
-    renderImage.SaveZImage("prj9_output/zbuffer.png");
-    renderImage.SaveImage("prj9_output/halton4_64a_0000001.png");
-    renderImage.ComputeSampleCountImage();
-    renderImage.SaveSampleCountImage("prj9_output/samplecount4_64a_0000001.png");
+    // renderImage.SaveZImage("prj12_output/zbuffer.png");
+    renderImage.SaveImage("../test.png");
+    // renderImage.ComputeSampleCountImage();
 }   
 
 void StopRender(){
@@ -517,7 +663,8 @@ void StopRender(){
 
 int main(int argc, const char * argv[]) {
     // load the scene file
-    int V0 = LoadScene("scene.xml");
+    // int V0 = LoadScene("scene.xml");
+    int V0 = LoadScene("scene_new.xml");
     ShowViewport();
     return 0;
 }

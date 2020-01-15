@@ -2,7 +2,7 @@
 ///
 /// \file       viewport.cpp 
 /// \author     Cem Yuksel (www.cemyuksel.com)
-/// \version    9.0
+/// \version    11.0
 /// \date       August 21, 2019
 ///
 /// \brief Example source for CS 6620 - University of Utah.
@@ -56,6 +56,7 @@ enum ViewMode
 	VIEWMODE_IMAGE,
 	VIEWMODE_Z,
 	VIEWMODE_SAMPLECOUNT,
+	VIEWMODE_IRRADCOMP,
 };
 
 enum MouseMode {
@@ -374,6 +375,11 @@ void GlutDisplay()
 		if ( ! renderImage.GetSampleCountImage() ) renderImage.ComputeSampleCountImage();
 		DrawImage( renderImage.GetSampleCountImage(), GL_UNSIGNED_BYTE, GL_LUMINANCE );
 		break;
+	case VIEWMODE_IRRADCOMP:
+		if ( renderImage.GetIrradianceComputationImage() ) {
+			DrawImage( renderImage.GetIrradianceComputationImage(), GL_UNSIGNED_BYTE, GL_LUMINANCE );
+		}
+		break;
 	}
 
 	glutSwapBuffers();
@@ -399,6 +405,7 @@ void GlutIdle()
 			}
 			glutPostRedisplay();
 		}
+		if ( viewMode == VIEWMODE_IRRADCOMP ) glutPostRedisplay();
 	}
 }
 
@@ -462,6 +469,10 @@ void GlutKeyboard(unsigned char key, int x, int y)
 		break;
 	case '4':
 		viewMode = VIEWMODE_SAMPLECOUNT;
+		glutPostRedisplay();
+		break;
+	case '5':
+		viewMode = VIEWMODE_IRRADCOMP;
 		glutPostRedisplay();
 		break;
 	}
@@ -596,6 +607,8 @@ void MtlBlinn::SetViewportMaterial(int subMtlID) const
 	c = ColorA(specular.GetColor());
 	glMaterialfv( GL_FRONT, GL_SPECULAR, &c.r );
 	glMaterialf( GL_FRONT, GL_SHININESS, glossiness*1.5f );
+	c = ColorA(emission.GetColor());
+	glMaterialfv( GL_FRONT, GL_EMISSION, &c.r );
 	const TextureMap *dm = diffuse.GetTexture();
 	if ( dm && dm->SetViewportTexture() ) {
 		glEnable( GL_TEXTURE_2D );
@@ -609,7 +622,7 @@ void MtlBlinn::SetViewportMaterial(int subMtlID) const
 		glDisable( GL_TEXTURE_2D );
 	}
 }
-void GenLight::SetViewportParam(int lightID, ColorA ambient, ColorA intensity, Vec4f pos ) const
+void GenLight::SetViewportParam(int lightID, ColorA ambient, ColorA intensity, Vec4f pos) const
 {
 	glEnable ( GL_LIGHT0 + lightID );
 	glLightfv( GL_LIGHT0 + lightID, GL_AMBIENT,  &ambient.r );
